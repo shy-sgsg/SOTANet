@@ -29,7 +29,7 @@ class HTML:
         self.doc = dominate.document(title=title)
         if refresh > 0:
             with self.doc.head:
-                meta(http_equiv="refresh", content=str(refresh))
+                meta(http_equiv="refresh", content="10")
 
     def get_image_dir(self):
         """Return the directory that stores images"""
