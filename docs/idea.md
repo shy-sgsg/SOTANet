@@ -95,7 +95,7 @@ GAN 对 Batch Size (BS) 敏感，因为它影响了 BN 层（Batch Normalization
 
 这一部分可以分为 **3 个具体步骤**来实施和验证：
 
-### 步骤 A：引入 Charbonnier 损失 ($\mathcal{L}_{\text{L1}}$ 替代/改进)
+### 步骤 A：引入 Charbonnier 损失/ Huber 损失 ($\mathcal{L}_{\text{L1}}$ 替代/改进)
 
 首先，用对异常值（如 SAR 噪声）更健壮的损失函数来替代或补充标准的 $\mathcal{L}_{\text{L1}}$。
 
@@ -107,6 +107,10 @@ GAN 对 Batch Size (BS) 敏感，因为它影响了 BN 层（Batch Normalization
 3. **替换：** 将生成器总损失 $\mathcal{L}_{\text{total}}$ 中的 **$\mathcal{L}_{\text{L1}}$** 项替换为 **$\mathcal{L}_{\text{Charbonnier}}$**，保持 $\lambda_{\text{Charbonnier}}$ 权重与原 $\lambda_{\text{L1}}$ 接近（如 100）。
     $$\mathcal{L}_{\text{Rec}} = \mathcal{L}_{\text{Charbonnier}}(I_{OPT}^{synthesized}, I_{OPT}^{real})$$
 
+设误差 $a = |x - y|$，则 Huber 损失 $L_{\delta}(a)$ 定义为：
+
+$$L_{\delta}(a) = \begin{cases} \frac{1}{2} a^2 & \text{if } |a| \le \delta \\ \delta |a| - \frac{1}{2} \delta^2 & \text{if } |a| > \delta \end{cases}$$
+
 ### 步骤 B：引入边缘/梯度损失 ($\mathcal{L}_{\text{Grad}}$)
 
 这一步是**强制模型学习边界**的关键，它明确地告诉模型“生成图像的边缘必须与真实图像的边缘对齐”。
@@ -117,7 +121,7 @@ GAN 对 Batch Size (BS) 敏感，因为它影响了 BN 层（Batch Normalization
     * **操作 1：** 使用 Sobel 算子分别计算真实图像 $I_{OPT}^{real}$ 和生成图像 $I_{OPT}^{synthesized}$ 的梯度图 $G_{real}$ 和 $G_{synthesized}$。
     * **操作 2：** 在这两个梯度图上计算 L1 损失（或 Charbonnier 损失）。
     $$\mathcal{L}_{\text{Grad}} = \| G_{synthesized} - G_{real} \|_1$$
-3. **更新总损失：** 将其添加到总损失中，并引入一个较小的权重 $\lambda_{\text{Grad}}$（例如 $1$ 到 $10$ 之间）。
+3. **更新总损失：** 将其添加到总损失中，并引入一个较大的权重 $\lambda_{\text{Grad}}$（例如 $50$ 到 $100$ 之间）。
     $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{Adv}} + \lambda_{\text{Rec}} \mathcal{L}_{\text{Rec}} + \lambda_{\text{Grad}} \mathcal{L}_{\text{Grad}}$$
 4. **验证：** 训练并检查生成图像的边缘（如道路、田埂）是否变得更锐利、更精确地对齐。
 
@@ -145,7 +149,6 @@ $$\mathcal{L}_{\text{total}} = \lambda_{\text{Adv}} \mathcal{L}_{\text{Adv}} + \
 
 通过这种分步和多损失的策略，您可以精确地引导网络优先关注和重建 SAR 输入中的几何结构信息。
 
-设误差 $a = |x - y|$，则 Huber 损失 $L_{\delta}(a)$ 定义为：
 
-$$L_{\delta}(a) = \begin{cases} \frac{1}{2} a^2 & \text{if } |a| \le \delta \\ \delta |a| - \frac{1}{2} \delta^2 & \text{if } |a| > \delta \end{cases}$$
+
 

@@ -1,7 +1,7 @@
 import torch
 from .base_model import BaseModel
 from . import networks
-from .losses import get_rec_loss
+from .losses import get_rec_loss, GradientLoss
 
 
 class Pix2PixModel(BaseModel):
@@ -38,6 +38,9 @@ class Pix2PixModel(BaseModel):
             parser.add_argument("--rec_loss", type=str, choices=["L1", "Charbonnier", "Huber"], default="L1", help="reconstruction loss to use: L1 | Charbonnier | Huber")
             parser.add_argument("--charb_eps", type=float, default=1e-3, help="epsilon for Charbonnier loss")
             parser.add_argument("--huber_delta", type=float, default=1.0, help="delta for Huber loss")
+            parser.add_argument("--use_grad_loss", action="store_true", help="enable gradient (edge) loss using Sobel kernels")
+            parser.add_argument("--grad_loss", type=str, choices=["L1", "Charbonnier", "Huber"], default="Charbonnier", help="loss type to use on gradient maps")
+            parser.add_argument("--lambda_Grad", type=float, default=100.0, help="weight for gradient loss")
 
         return parser
 
@@ -69,6 +72,12 @@ class Pix2PixModel(BaseModel):
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)  # move to the device for custom loss
             # reconstruction loss (configurable): keep attribute name 'criterionL1' for backward compatibility
             self.criterionL1 = get_rec_loss(opt.rec_loss, eps=opt.charb_eps, delta=opt.huber_delta)
+            # optional gradient (edge) loss
+            if getattr(opt, "use_grad_loss", False):
+                self.criterionGrad = GradientLoss(loss_type=opt.grad_loss, eps=opt.charb_eps, delta=opt.huber_delta)
+                # add logging name
+                if "G_Grad" not in self.loss_names:
+                    self.loss_names.insert(1, "G_Grad")
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
@@ -114,8 +123,13 @@ class Pix2PixModel(BaseModel):
         self.loss_G_GAN = self.criterionGAN(pred_fake, True)
         # Second, G(A) = B
         self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_L1
+        # optional gradient loss (edge loss)
+        if hasattr(self, "criterionGrad"):
+            self.loss_G_Grad = self.criterionGrad(self.fake_B, self.real_B) * self.opt.lambda_Grad
+            self.loss_G = self.loss_G_GAN + self.loss_G_L1 + self.loss_G_Grad
+        else:
+            self.loss_G = self.loss_G_GAN + self.loss_G_L1
         # combine loss and calculate gradients
-        self.loss_G = self.loss_G_GAN + self.loss_G_L1
         self.loss_G.backward()
 
     def optimize_parameters(self):
