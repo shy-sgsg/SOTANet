@@ -1,6 +1,7 @@
 import torch
 from .base_model import BaseModel
 from . import networks
+from .losses import get_rec_loss
 
 
 class Pix2PixModel(BaseModel):
@@ -33,7 +34,10 @@ class Pix2PixModel(BaseModel):
         parser.set_defaults(norm="batch", netG="unet_256", dataset_mode="aligned")
         if is_train:
             parser.set_defaults(pool_size=0, gan_mode="vanilla")
-            parser.add_argument("--lambda_L1", type=float, default=100.0, help="weight for L1 loss")
+            parser.add_argument("--lambda_L1", type=float, default=100.0, help="weight for reconstruction loss (L1 or alternatives)")
+            parser.add_argument("--rec_loss", type=str, choices=["L1", "Charbonnier", "Huber"], default="L1", help="reconstruction loss to use: L1 | Charbonnier | Huber")
+            parser.add_argument("--charb_eps", type=float, default=1e-3, help="epsilon for Charbonnier loss")
+            parser.add_argument("--huber_delta", type=float, default=1.0, help="delta for Huber loss")
 
         return parser
 
@@ -63,7 +67,8 @@ class Pix2PixModel(BaseModel):
         if self.isTrain:
             # define loss functions
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)  # move to the device for custom loss
-            self.criterionL1 = torch.nn.L1Loss()
+            # reconstruction loss (configurable): keep attribute name 'criterionL1' for backward compatibility
+            self.criterionL1 = get_rec_loss(opt.rec_loss, eps=opt.charb_eps, delta=opt.huber_delta)
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
