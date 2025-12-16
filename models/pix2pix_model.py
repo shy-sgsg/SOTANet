@@ -1,7 +1,7 @@
 import torch
 from .base_model import BaseModel
 from . import networks
-from .losses import get_rec_loss, GradientLoss
+from .losses import get_rec_loss, GradientLoss, SSIMLoss, VGGFeatureLoss
 
 
 class Pix2PixModel(BaseModel):
@@ -40,7 +40,12 @@ class Pix2PixModel(BaseModel):
             parser.add_argument("--huber_delta", type=float, default=1.0, help="delta for Huber loss")
             parser.add_argument("--use_grad_loss", action="store_true", help="enable gradient (edge) loss using Sobel kernels")
             parser.add_argument("--grad_loss", type=str, choices=["L1", "Charbonnier", "Huber"], default="Charbonnier", help="loss type to use on gradient maps")
-            parser.add_argument("--lambda_Grad", type=float, default=100.0, help="weight for gradient loss")
+            parser.add_argument("--lambda_Grad", type=float, default=50.0, help="weight for gradient loss")
+            parser.add_argument("--use_ssim", action="store_true", help="enable SSIM loss (1 - SSIM)")
+            parser.add_argument("--lambda_SSIM", type=float, default=1.0, help="weight for SSIM loss")
+            parser.add_argument("--use_perc", action="store_true", help="enable perceptual (VGG shallow) loss")
+            parser.add_argument("--lambda_Perc", type=float, default=1.0, help="weight for perceptual loss")
+            parser.add_argument("--perc_layers", type=str, default="relu1_2,relu2_2", help="comma-separated VGG layers to use for perceptual loss (small set recommended)")
 
         return parser
 
@@ -78,6 +83,17 @@ class Pix2PixModel(BaseModel):
                 # add logging name
                 if "G_Grad" not in self.loss_names:
                     self.loss_names.insert(1, "G_Grad")
+            # optional SSIM loss
+            if getattr(opt, "use_ssim", False):
+                self.criterionSSIM = SSIMLoss(window_size=11, sigma=1.5, data_range=1.0)
+                if "G_SSIM" not in self.loss_names:
+                    self.loss_names.insert(1, "G_SSIM")
+            # optional perceptual loss (VGG shallow)
+            if getattr(opt, "use_perc", False):
+                perc_layers = [s.strip() for s in opt.perc_layers.split(",") if s.strip()]
+                self.criterionPerc = VGGFeatureLoss(layers=perc_layers, device=self.device)
+                if "G_Perc" not in self.loss_names:
+                    self.loss_names.insert(1, "G_Perc")
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
@@ -129,6 +145,14 @@ class Pix2PixModel(BaseModel):
             self.loss_G = self.loss_G_GAN + self.loss_G_L1 + self.loss_G_Grad
         else:
             self.loss_G = self.loss_G_GAN + self.loss_G_L1
+        # optional SSIM loss
+        if hasattr(self, "criterionSSIM"):
+            self.loss_G_SSIM = self.criterionSSIM(self.fake_B, self.real_B) * self.opt.lambda_SSIM
+            self.loss_G = self.loss_G + self.loss_G_SSIM
+        # optional perceptual loss
+        if hasattr(self, "criterionPerc"):
+            self.loss_G_Perc = self.criterionPerc(self.fake_B, self.real_B) * self.opt.lambda_Perc
+            self.loss_G = self.loss_G + self.loss_G_Perc
         # combine loss and calculate gradients
         self.loss_G.backward()
 

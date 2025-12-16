@@ -105,3 +105,126 @@ class GradientLoss(nn.Module):
         loss_y = self.criterion(G_in_y, G_tgt_y)
 
         return loss_x + loss_y
+
+
+class SSIMLoss(nn.Module):
+    """Differentiable SSIM loss (returns 1 - mean_ssim).
+
+    Implementation adapted to be lightweight and dependency-free. Computes
+    SSIM per-channel and averages across channels and batch.
+    """
+
+    def __init__(self, window_size: int = 11, sigma: float = 1.5, data_range: float = 1.0):
+        super(SSIMLoss, self).__init__()
+        self.window_size = window_size
+        self.sigma = sigma
+        self.data_range = float(data_range)
+        # create gaussian window
+        self.register_buffer("_window", self.create_window(window_size, sigma))
+
+    def create_window(self, window_size, sigma):
+        coords = torch.arange(window_size, dtype=torch.float32) - window_size // 2
+        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+        g = g / g.sum()
+        w = g[:, None] @ g[None, :]
+        return w.unsqueeze(0).unsqueeze(0)  # 1x1xWxH
+
+    def _pad(self, x):
+        pad = self.window_size // 2
+        return F.pad(x, (pad, pad, pad, pad), mode="reflect")
+
+    def forward(self, img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
+        # expect tensors in [0,1] float
+        if img1.dim() != 4 or img2.dim() != 4:
+            raise ValueError("SSIMLoss expects 4D tensors (B,C,H,W)")
+
+        B, C, H, W = img1.shape
+        window = self._window.to(device=img1.device, dtype=img1.dtype)
+        K1 = 0.01
+        K2 = 0.03
+        L = self.data_range
+        C1 = (K1 * L) ** 2
+        C2 = (K2 * L) ** 2
+
+        # compute per-channel SSIM
+        mu1 = F.conv2d(self._pad(img1.view(B * C, 1, H, W)), window, padding=0, groups=1)
+        mu2 = F.conv2d(self._pad(img2.view(B * C, 1, H, W)), window, padding=0, groups=1)
+        mu1 = mu1.view(B, C, H, W)
+        mu2 = mu2.view(B, C, H, W)
+
+        mu1_sq = mu1 * mu1
+        mu2_sq = mu2 * mu2
+        mu1_mu2 = mu1 * mu2
+
+        sigma1_sq = F.conv2d(self._pad((img1 * img1).view(B * C, 1, H, W)), window, padding=0).view(B, C, H, W) - mu1_sq
+        sigma2_sq = F.conv2d(self._pad((img2 * img2).view(B * C, 1, H, W)), window, padding=0).view(B, C, H, W) - mu2_sq
+        sigma12 = F.conv2d(self._pad((img1 * img2).view(B * C, 1, H, W)), window, padding=0).view(B, C, H, W) - mu1_mu2
+
+        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+        # clamp to [0,1]
+        ssim_map = torch.clamp(ssim_map, 0.0, 1.0)
+        # mean over spatial and channels and batch
+        ssim_val = ssim_map.mean()
+        return 1.0 - ssim_val
+
+
+class VGGFeatureLoss(nn.Module):
+    """Perceptual loss using VGG features (shallow layers).
+
+    Uses torchvision's VGG16 pretrained network and extracts features at
+    specified layer names (e.g., 'relu1_2', 'relu2_2'). Computes L1 loss
+    between feature maps.
+    """
+
+    def __init__(self, layers=("relu1_2", "relu2_2"), device="cpu"):
+        super(VGGFeatureLoss, self).__init__()
+        try:
+            import torchvision.models as models
+        except Exception as e:
+            raise ImportError("torchvision is required for VGGFeatureLoss") from e
+
+        vgg = models.vgg16(pretrained=True).features.eval()
+        for p in vgg.parameters():
+            p.requires_grad = False
+        self.vgg = vgg.to(device)
+        self.layers = layers
+        # mapping layer names to indices in vgg.features
+        self.layer_name_mapping = {
+            "relu1_1": 1,
+            "relu1_2": 3,
+            "relu2_1": 6,
+            "relu2_2": 8,
+            "relu3_1": 11,
+            "relu3_2": 13,
+            "relu3_3": 15,
+            "relu4_1": 18,
+            "relu4_2": 20,
+            "relu4_3": 22,
+            "relu5_1": 25,
+        }
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # expect input and target in [0,1], 3-channel RGB
+        if input.dim() != 4 or target.dim() != 4:
+            raise ValueError("VGGFeatureLoss expects 4D tensors (B,C,H,W)")
+        # normalize to VGG expected mean/std
+        mean = torch.tensor([0.485, 0.456, 0.406], device=input.device).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=input.device).view(1, 3, 1, 1)
+        inp = (input - mean) / std
+        tgt = (target - mean) / std
+
+        feats_in = []
+        feats_tgt = []
+        x_in = inp
+        x_tgt = tgt
+        loss = 0.0
+        max_idx = max(self.layer_name_mapping[l] for l in self.layers)
+        for i, layer in enumerate(self.vgg):
+            x_in = layer(x_in)
+            x_tgt = layer(x_tgt)
+            if i in [self.layer_name_mapping[l] for l in self.layers]:
+                loss = loss + F.l1_loss(x_in, x_tgt)
+            if i >= max_idx:
+                break
+
+        return loss
