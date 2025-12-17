@@ -148,7 +148,3 @@ $$L_{\delta}(a) = \begin{cases} \frac{1}{2} a^2 & \text{if } |a| \le \delta \\ \
 $$\mathcal{L}_{\text{total}} = \lambda_{\text{Adv}} \mathcal{L}_{\text{Adv}} + \lambda_{\text{Char}} \mathcal{L}_{\text{Charbonnier}} + \lambda_{\text{Grad}} \mathcal{L}_{\text{Grad}} + \lambda_{\text{SSIM}} (1 - \mathcal{L}_{\text{SSIM}}) + \lambda_{\text{Perc}} \mathcal{L}_{\text{Perc}}^{\text{Shallow}}$$
 
 通过这种分步和多损失的策略，您可以精确地引导网络优先关注和重建 SAR 输入中的几何结构信息。
-
-
-
-

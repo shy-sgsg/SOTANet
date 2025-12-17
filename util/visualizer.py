@@ -2,7 +2,7 @@ import numpy as np
 import sys
 import ntpath
 import time
-from . import util, html
+from . import html_tools, util
 from pathlib import Path
 import wandb
 import os
@@ -118,7 +118,7 @@ class Visualizer:
                 util.save_image(image_numpy, img_path)
 
             # update website
-            webpage = html.HTML(self.web_dir, f"Experiment name = {self.name}", refresh=1)
+            webpage = html_tools.HTML(self.web_dir, f"Experiment name = {self.name}", refresh=1)
             for n in range(epoch, 0, -1):
                 webpage.add_header(f"epoch [{n}]")
                 ims, txts, links = [], [], []

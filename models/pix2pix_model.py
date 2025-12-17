@@ -1,4 +1,5 @@
 import torch
+import os
 from .base_model import BaseModel
 from . import networks
 from .losses import get_rec_loss, GradientLoss, SSIMLoss, VGGFeatureLoss
@@ -41,6 +42,19 @@ class Pix2PixModel(BaseModel):
             parser.add_argument("--use_grad_loss", action="store_true", help="enable gradient (edge) loss using Sobel kernels")
             parser.add_argument("--grad_loss", type=str, choices=["L1", "Charbonnier", "Huber"], default="Charbonnier", help="loss type to use on gradient maps")
             parser.add_argument("--lambda_Grad", type=float, default=50.0, help="weight for gradient loss")
+            parser.add_argument("--grad_downsample", type=int, default=1, help="downsample factor for gradient loss (1=no downsample, 2=2x, 4=4x)")
+            parser.add_argument("--grad_mag_thresh", type=float, default=0.05, help="gradient magnitude threshold to form edge mask (on downsampled gradients)")
+            parser.add_argument("--grad_density_window", type=int, default=0, help="local window size for gradient density suppression (0=disabled, e.g. 7)")
+            parser.add_argument("--grad_density_thresh", type=float, default=0.5, help="density threshold (fraction) above which regions are suppressed for gradient loss")
+            parser.add_argument("--use_canny_grad", action="store_true", help="enable Canny-based structural edge loss (medianBlur + Canny + DT)")
+            parser.add_argument("--canny_median_ksize", type=int, default=3, help="median blur kernel size for Canny preprocessing (odd int)")
+            parser.add_argument("--canny_scales", type=str, default="4,2,1", help="comma-separated downsample scales for multi-scale Canny DT (coarse->fine)")
+            parser.add_argument("--canny_weights", type=str, default="0.6,0.3,0.1", help="comma-separated weights for scales (same order as --canny_scales)")
+            parser.add_argument("--canny_thresholds", type=str, default="50:150", help="semicolon-separated Canny threshold pairs (t1:t2;...), applied OR-combined")
+            parser.add_argument("--canny_min_area", type=int, default=30, help="minimum connected component area (pixels) to keep in Canny edge map")
+            parser.add_argument("--lambda_Canny", type=float, default=10.0, help="weight for Canny edge DT loss")
+            parser.add_argument("--save_edge_vis", action="store_true", help="save edge visualization maps (real edges, dt, soft edges, grad mag) to disk")
+            parser.add_argument("--edge_vis_dir", type=str, default="results/edge_vis", help="directory to save edge visualizations when --save_edge_vis is set")
             parser.add_argument("--use_ssim", action="store_true", help="enable SSIM loss (1 - SSIM)")
             parser.add_argument("--lambda_SSIM", type=float, default=1.0, help="weight for SSIM loss")
             parser.add_argument("--use_perc", action="store_true", help="enable perceptual (VGG shallow) loss")
@@ -79,10 +93,69 @@ class Pix2PixModel(BaseModel):
             self.criterionL1 = get_rec_loss(opt.rec_loss, eps=opt.charb_eps, delta=opt.huber_delta)
             # optional gradient (edge) loss
             if getattr(opt, "use_grad_loss", False):
-                self.criterionGrad = GradientLoss(loss_type=opt.grad_loss, eps=opt.charb_eps, delta=opt.huber_delta)
+                self.criterionGrad = GradientLoss(
+                    loss_type=opt.grad_loss,
+                    eps=opt.charb_eps,
+                    delta=opt.huber_delta,
+                    downsample=getattr(opt, "grad_downsample", 1),
+                    density_window=getattr(opt, "grad_density_window", 0),
+                    density_thresh=getattr(opt, "grad_density_thresh", 0.5),
+                    mag_thresh=getattr(opt, "grad_mag_thresh", 0.05),
+                )
                 # add logging name
                 if "G_Grad" not in self.loss_names:
                     self.loss_names.insert(1, "G_Grad")
+            # optional Canny-based structural loss
+            if getattr(opt, "use_canny_grad", False):
+                # parse scales and weights and thresholds
+                scales = [int(s) for s in opt.canny_scales.split(",") if s.strip()]
+                weights = [float(w) for w in opt.canny_weights.split(",") if w.strip()]
+                # parse threshold pairs like "50:150;30:90"
+                th_pairs = []
+                for seg in opt.canny_thresholds.split(";"):
+                    seg = seg.strip()
+                    if not seg:
+                        continue
+                    if ":" in seg:
+                        a, b = seg.split(":")
+                        th_pairs.append((int(a), int(b)))
+                    else:
+                        # single value => use as high threshold with low=high/3
+                        v = int(seg)
+                        th_pairs.append((v // 3, v))
+
+                self.criterionCanny = None
+                try:
+                    self.criterionCanny = VGGFeatureLoss  # dummy to ensure name exists
+                except Exception:
+                    self.criterionCanny = None
+                # import CannyEdgeLoss lazily from losses
+                from .losses import CannyEdgeLoss
+
+                self.criterionCanny = CannyEdgeLoss(
+                    scales=scales,
+                    weights=weights,
+                    median_ksize=opt.canny_median_ksize,
+                    canny_thresholds=th_pairs,
+                    min_area=opt.canny_min_area,
+                    device=self.device,
+                )
+                # enable visualization if requested
+                if getattr(opt, "save_edge_vis", False):
+                    vis_dir = getattr(opt, "edge_vis_dir", None)
+                    if vis_dir is None:
+                        vis_dir = os.path.join("results", "edge_vis")
+                    # ensure absolute path under opt.results_dir if available
+                    try:
+                        import os as _os
+                        base_dir = getattr(opt, "results_dir", None) or getattr(opt, "checkpoints_dir", None) or "."
+                        if base_dir:
+                            vis_dir = _os.path.join(base_dir, vis_dir)
+                    except Exception:
+                        pass
+                    self.criterionCanny.enable_visualization(vis_dir)
+                if "G_Canny" not in self.loss_names:
+                    self.loss_names.insert(1, "G_Canny")
             # optional SSIM loss
             if getattr(opt, "use_ssim", False):
                 self.criterionSSIM = SSIMLoss(window_size=11, sigma=1.5, data_range=1.0)
@@ -153,6 +226,10 @@ class Pix2PixModel(BaseModel):
         if hasattr(self, "criterionPerc"):
             self.loss_G_Perc = self.criterionPerc(self.fake_B, self.real_B) * self.opt.lambda_Perc
             self.loss_G = self.loss_G + self.loss_G_Perc
+        # optional Canny-based loss
+        if hasattr(self, "criterionCanny"):
+            self.loss_G_Canny = self.criterionCanny(self.fake_B, self.real_B) * getattr(self.opt, "lambda_Canny", 10.0)
+            self.loss_G = self.loss_G + self.loss_G_Canny
         # combine loss and calculate gradients
         self.loss_G.backward()
 
