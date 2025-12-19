@@ -338,6 +338,10 @@ class CannyEdgeLoss(nn.Module):
         soft_thresh: float = 0.02,
         soft_alpha: float = 5.0,
         device="cpu",
+        dt_clip: float = 1.0,
+        loss_clip: float = 1e4,
+        dump_on_extreme: bool = False,
+        dump_dir: str = None,
     ):
         super(CannyEdgeLoss, self).__init__()
         try:
@@ -362,6 +366,13 @@ class CannyEdgeLoss(nn.Module):
         self.soft_thresh = float(soft_thresh)
         self.soft_alpha = float(soft_alpha)
         self.device = device
+        # maximum allowed DT value (per-scale) to avoid extreme distances
+        self.dt_clip = float(dt_clip) if dt_clip is not None else None
+        # maximum per-scale loss value to clip to (helps avoid spikes)
+        self.loss_clip = float(loss_clip) if loss_clip is not None else None
+        # optional dumping of offending samples when extreme loss/clamping occurs
+        self.dump_on_extreme = bool(dump_on_extreme)
+        self.dump_dir = dump_dir
         # visualization
         self.save_vis = False
         self.vis_dir = None
@@ -480,6 +491,8 @@ class CannyEdgeLoss(nn.Module):
 
         # soft edge via sigmoid around soft_thresh
         soft = torch.sigmoid((grad_mag - self.soft_thresh) * self.soft_alpha)
+        # guard for NaN/Inf in soft
+        soft = torch.nan_to_num(soft, nan=0.0, posinf=1.0, neginf=0.0)
         # soft in [0,1], shape (B,1,H,W)
 
         # prepare vis directory if needed
@@ -501,12 +514,32 @@ class CannyEdgeLoss(nn.Module):
                 w = float(self.weights[i]) if i < len(self.weights) else 1.0
                 # dt is (H_s, W_s) float32 normalized
                 dt_t = torch.from_numpy(dt).to(gen.device).unsqueeze(0).unsqueeze(0)  # 1x1xH_sxW_s
+                # sanitize dt tensor
+                dt_t = torch.nan_to_num(dt_t, nan=0.0, posinf=float(self.dt_clip) if self.dt_clip is not None else 1.0, neginf=0.0)
+                # clamp extremely large DT values to avoid explosion
+                if self.dt_clip is not None:
+                    # ensure dt_clip positive
+                    if self.dt_clip <= 0:
+                        self.dt_clip = float(max(1e-6, abs(self.dt_clip)))
+                    dt_t = torch.clamp(dt_t, min=0.0, max=float(self.dt_clip))
                 # resize soft[b] to dt size
                 soft_b = soft[b : b + 1]
                 soft_resized = F.interpolate(soft_b, size=(dt.shape[0], dt.shape[1]), mode="bilinear", align_corners=False)
                 # multiply and sum (mean over pixels)
                 loss_map = soft_resized * dt_t
-                total_loss = total_loss + w * loss_map.mean()
+                loss_val = loss_map.mean()
+                # sanitize scalar
+                if not torch.isfinite(loss_val):
+                    try:
+                        loss_val = torch.nan_to_num(loss_val, nan=0.0, posinf=float(self.loss_clip) if self.loss_clip is not None else 1e6, neginf=0.0)
+                    except Exception:
+                        loss_val = torch.tensor(0.0, device=gen.device)
+                # clip loss_val to configured maximum to avoid single-term explosion
+                clipped = False
+                if self.loss_clip is not None and loss_val > float(self.loss_clip):
+                    loss_val = torch.tensor(float(self.loss_clip), device=gen.device, dtype=loss_val.dtype)
+                    clipped = True
+                total_loss = total_loss + w * loss_val
 
                 # optionally save visualizations
                 if do_vis and vis_dir is not None:
@@ -555,6 +588,26 @@ class CannyEdgeLoss(nn.Module):
                         cv2.imwrite(fn_gen, gen_rgb_rs)
                     except Exception:
                         # best-effort; do not raise
+                        pass
+                # optional dump when extreme clipping occurred
+                if clipped and self.dump_on_extreme and self.dump_dir is not None:
+                    try:
+                        os.makedirs(self.dump_dir, exist_ok=True)
+                        dump_base = f"dump_b{b}_s{i}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                        # save real image full-res
+                        fn_r = os.path.join(self.dump_dir, dump_base + "_real.png")
+                        cv2.imwrite(fn_r, (real_b * 255.0).astype(self.np.uint8))
+                        # save gen image full-res
+                        fn_g = os.path.join(self.dump_dir, dump_base + "_gen.png")
+                        gen_rgb_full = (gen[b].detach().cpu().numpy().transpose(1, 2, 0) * 255.0).astype(self.np.uint8)
+                        cv2.imwrite(fn_g, gen_rgb_full)
+                        # save soft map resized to dt as u8
+                        fn_soft_dump = os.path.join(self.dump_dir, dump_base + "_soft.png")
+                        soft_np_dump = (soft_resized.squeeze(0).squeeze(0).detach().cpu().numpy() * 255.0).astype(self.np.uint8)
+                        cv2.imwrite(fn_soft_dump, soft_np_dump)
+                        # log to stdout
+                        print(f"CannyEdgeLoss: clipped extreme per-scale loss for batch {b}, scale_idx {i}, dumped files to {self.dump_dir}")
+                    except Exception:
                         pass
 
         # average over batch

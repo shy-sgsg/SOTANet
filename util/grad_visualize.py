@@ -86,5 +86,6 @@ image_file = 'datasets/sar2opt/val/ROIs1868_summer_s1_59_p425.png'
 visualize_edge_comparison(
     image_file, 
     downsample_factor=1, 
-    thresholds=[(30, 100), (50, 150), (80, 200)] # 测试不同的 Canny 阈值
+    thresholds=[(50, 150)]
+    # thresholds=[(30, 100), (50, 150), (80, 200)] # 测试不同的 Canny 阈值
 )
